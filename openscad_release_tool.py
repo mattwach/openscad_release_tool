@@ -5,9 +5,10 @@ thingverse/etc.
 There are two cases:
 
   1) Relative include: in this case, the file is copied along the same
-  relative path in the output put.  There is no need to change the file.
-  2) include path: In this case, the file is copied to a lib/ directory.  The
-  file is then changed to use this new relative lib dir.
+  relative path in the output dir.  There is no need to change the file.
+  2) include path: In this case, the file is copied within --lib_dirname.  The
+  use/import in the original file is then changed to use this new relative lib
+  dir.
 
 This continues recursively.
 """
@@ -23,23 +24,24 @@ import shutil
 import sys
 
 PARSER = argparse.ArgumentParser(
-    description='Bundle a openscad file and all of its includes into a single '
+    description='Bundle an OpenSCAD file and all of its includes into a single '
     'directory.')
 
 PARSER.add_argument(
     'filename',
-    help='Path to main openscad file.'
+    help='Path to main OpenSCAD file.'
 )
 
 PARSER.add_argument(
     'output_dir',
-    help='Where to place the output.  Directory must not yet exist.'
+    help='Where to place the output.  Directory must not yet exist unless '
+    '--overwrite is used.'
 )
 
 PARSER.add_argument(
     '--lib_dirname',
     default='lib',
-    help='Directory to place library files in'
+    help='Subdirectory within output_dir where library files are copied.'
 )
 
 PARSER.add_argument(
@@ -63,9 +65,9 @@ PARSER.add_argument(
 PARSER.add_argument(
     '--add',
     action='append',
-    help='Adds a glob pattern from <filenames> directory (or any sub '
-      'directory). Any files matching this pattern will also be copied to the '
-      'output directory. This option can be specified multiple times')
+    help='Adds a glob pattern. Any files matching this pattern will be copied '
+    'from file <filename> tree to the <output_dir> tree. This option can be '
+    'specified multiple times.')
 
 PARSER.add_argument(
     '--ignore_imports',
@@ -119,11 +121,11 @@ class OutputDirExistsError(Error):
 def _prepare(
     filename: str, root_output_dir: str, lib_dirname: str, overwrite: bool
     ) -> None:
-  """Checks for the existance and non existance of files, makes output dir.
+  """Checks and prepares environment, makes output dir.
 
   Args:
     filename: root filename that was provided at the commandline.
-    root_output_dir: root output directort that was provided at the commandline.
+    root_output_dir: root output directory that was provided at the commandline.
     lib_dirname: The directory where library files should be copied.  Optionally
       provided at the commandline as --lib_dirname.
     overwrite: The value of --overwrite at the commandline.  If true, any
@@ -156,19 +158,21 @@ def _prepare(
 class CopyAndParse:
   """CopyAndParse is a per-character state machine parser.
 
-    The parser mostly copies the file from source to destination.  When
-    a use or include is found, the target file is copied to the output
-    directory, the include path is modified if needed, and CopyAndParse
-    is invokes rcursively on the included file.
+    The parser mostly copies the file from source to destination.
 
-    This class also handles the import case.  This case is similar except
-    there is no need to recurse into the file.
+    When a use or include is found, the associated include file is copied to
+    the output directory, the include path in the source is modified if
+    needed, and CopyAndParse is invokes recursively on the included file.
+
+    This class also handles the import case.  The import case is similar to
+    use/include except there is no need to recurse into the imported file.
 
     It's also possible for imports to be built up from variables or
     expressions.  This parser is not advanced enough to handle those
     cases and will output a warning when they are encountered.
   """
-  # file_chars builds up automatically and is cleared by certain events
+  # file_chars contains some substring of the currently parsed file,
+  # it builds up automatically and is cleared by certain events.
   file_chars: List[str] = []
   # root_output_dir is the root of the output dir as provided at the commandline
   root_output_dir: str = ''
@@ -176,12 +180,12 @@ class CopyAndParse:
   target_path: str = ''
   # path to the source file
   source_path: str = ''
-  # library output directory prefix
+  # library output directory prefix, e.g. --lib_dirname
   lib_dirname: str = ''
-  # a set of library paths that were used.  This is a shared structure that is
-  # later used to search for license files
+  # Tracks a set of library paths that were used.  This is a shared structure
+  # that is later used to search for license files.
   used_library_dirs = Set[str]
-  # If true, imports are ignored
+  # If true, imports are ignored by the parser.
   ignore_imports: bool = False
 
   def __init__(
@@ -231,12 +235,40 @@ class CopyAndParse:
         self.file_chars.append(c)
         state = state(c, fout)
 
-  def _looking_for_semicolon(self, c: str, fout) -> Callable[[str], Any]:
-    """State machine function: searches for a ;."""
-    if fout:
-      fout.write(c)
-    if c != ';':
-      return self._looking_for_semicolon
+  def _looking_for_word(self, c: str, fout) -> Callable[[str], Any]:
+    """State machine function: Looks for the start of a keyword token."""
+    fout.write(c)
+    if c in ('\n', ' ', '\t'):
+      return self._looking_for_word
+    self.file_chars = [c]
+    return self._building_word
+
+  def _building_word(self, c: str, fout) -> Callable[[str], Any]:
+    """State machine function: builds up a word in self.file_chars."""
+    fout.write(c)
+    if c == '/' and self.file_chars[-2] == '/':
+      # a line comment
+      return self._looking_for_eol
+
+    if c == '*' and self.file_chars[-2] == '/':
+      # a block comment
+      return self._looking_for_end_of_comment
+
+    # The usual a-zA-Z0-9_ make up a "word".
+    if (('A' <= c <= 'Z') or
+        ('a' <= c <= 'z') or
+        ('0' <= c <= '9') or
+        (c == '_')):
+      return self._building_word
+
+    # Reached the end of the word, is it an interesting one?
+    word = ''.join(self.file_chars[:-1])
+    if word in ('include', 'use'):
+      return self._looking_for_include(c, None)
+
+    if word == 'import' and not self.ignore_imports:
+      return self._looking_for_import(c, None)
+
     return self._looking_for_word
 
   def _looking_for_eol(self, c: str, fout) -> Callable[[str], Any]:
@@ -251,36 +283,16 @@ class CopyAndParse:
     """State machine function: searches for an end of a multi-line comment."""
     fout.write(c)
     if c == '/' and self.file_chars[-2] == '*':
-      # comment
+      # end of block comment found
       return self._looking_for_word
     return self._looking_for_end_of_comment
 
-  def _building_word(self, c: str, fout) -> Callable[[str], Any]:
-    """State machine function: builds up a word in self.file_chars."""
-    fout.write(c)
-    if c == '/' and self.file_chars[-2] == '/':
-      # comment
-      return self._looking_for_eol
-
-    if c == '*' and self.file_chars[-2] == '/':
-      # comment
-      return self._looking_for_end_of_comment
-
-    # just looking for include or use
-    if (('A' <= c <= 'Z') or
-        ('a' <= c <= 'z') or
-        ('0' <= c <= '9') or
-        (c == '_')):
-      return self._building_word
-
-    # done checking
-    word = ''.join(self.file_chars[:-1])
-    if word in ('include', 'use'):
-      return self._looking_for_include(c, None)
-
-    if word == 'import' and not self.ignore_imports:
-      return self._looking_for_import(c, None)
-
+  def _looking_for_semicolon(self, c: str, fout) -> Callable[[str], Any]:
+    """State machine function: searches for a ;"""
+    if fout:
+      fout.write(c)
+    if c != ';':
+      return self._looking_for_semicolon
     return self._looking_for_word
 
   def _looking_for_import(self, c: str, fout) -> Callable[[str], Any]:
@@ -333,10 +345,9 @@ class CopyAndParse:
           'Could not find import path (%s) in %s' % (
             import_path, import_abs_path))
 
-    output_path = os.path.join(self.root_output_dir, new_import_path)
-    if not os.path.exists(os.path.dirname(output_path)):
-      os.makedirs(os.path.dirname(output_path))
     target_path = os.path.join(self.root_output_dir, new_import_path)
+    if not os.path.exists(os.path.dirname(target_path)):
+      os.makedirs(os.path.dirname(target_path))
     if not os.path.exists(target_path):
       logging.info('%simport %s -> %s' ,
             self.indent_str, import_abs_path, target_path)
@@ -346,15 +357,6 @@ class CopyAndParse:
     fout.write(c)
 
     return self._looking_for_semicolon
-
-
-  def _looking_for_word(self, c: str, fout) -> Callable[[str], Any]:
-    """State machine function: Looks for the start of a keyword token."""
-    fout.write(c)
-    if c in ('\n', ' ', '\t'):
-      return self._looking_for_word
-    self.file_chars = [c]
-    return self._building_word
 
   def _looking_for_include(self, c: str, fout) -> Callable[[str], Any]:
     """State machine function: Looks for the start of an include path."""
@@ -411,16 +413,10 @@ class CopyAndParse:
         os.path.join(output_dir, include_path),
         include_path)
 
-    # Search through INCLUDE_PATHS.  The real OpenSCAD only supports a single
-    # library path but supporting multiple allows for better release testing
-    # where the releaser can purposely sever the library path connection to
-    # OpenSCAD itself, and provide libraries to this tool using an alternate
-    # path, finally checking the correctness of the release in OpenSCAD, where
-    # there is no chance of picking up a library function and getting a false
-    # pass.
+    # Look though the provided include libraries.
     for include_prefix in INCLUDE_PATHS:
       if os.path.exists(os.path.join(include_prefix, include_path)):
-        # the new output path is the same as the OpenSCAD library path, but
+        # the new output_path is the same as the OpenSCAD library path, but
         # now resides in the output directory, under --lib_name
         output_path = os.path.join(
             os.path.join(self.root_output_dir, self.lib_dirname),
@@ -428,7 +424,7 @@ class CopyAndParse:
         logging.debug('%soutput_dir: %s', self.indent_str, output_dir)
         logging.debug('%soutput_path: %s', self.indent_str, output_path)
         # calculate how to get from the output_dir of the target path to the
-        # target file using relpath.  This handh python built-in can avoid
+        # target file using relpath.  This handy Python built-in can avoid
         # messy-looking relative paths.
         rel_path = os.path.relpath(output_path, output_dir)
         logging.debug('%srel_path: %s', self.indent_str, rel_path)
@@ -452,25 +448,24 @@ def _find_license_files(
     output_library_dir: Where library files are copied.
     used_library_dirs: A set of all of the library directories that provided files.
   """
+  # License files are searched for up the directory tree.  stop_paths, indicates
+  # Where the root of the libraries reside so that the search does not continue
+  # all the way to the root directory (e.g. / in unix)
   stop_paths = set(os.path.abspath(p) for p in INCLUDE_PATHS)
   stop_paths.add(os.path.abspath(project_dir))
   already_copied = set()
 
   def contains_a_stop_path(library_dir):
-    for stop_path in stop_paths:
-      if library_dir.startswith(stop_path):
-        return True
-    return False
+    return any(p for p in stop_paths if library_dir.startswith(p))
 
   def copy_file(path):
     if path in already_copied:
       logging.debug('license file %s is already copied', path)
       return
 
-    for stop_path in stop_paths:
-      if path.startswith(stop_path):
-        output_path = os.path.join(output_library_dir, path[len(stop_path)+1:])
-        break
+    output_path = next(
+        os.path.join(output_library_dir, path[len(p)+1:])
+        for p in stop_paths if path.startswith(p))
 
     logging.info('License file %s -> %s', path, output_path)
     shutil.copy(path, output_path)
