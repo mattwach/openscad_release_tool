@@ -8,8 +8,8 @@ Anyone who downloads this uploaded zip file can then load your model into
 OpenSCAD without having to install the libraries you used.
 
 This is great for people who are not (yet) OpenSCAD users but want to make
-parameter changes to a model without the friction or tracking down and
-installing libraries to the unfamiliar-to-them tool.
+parameter changes to a model without the friction of tracking down and
+installing libraries.
 
 # Usage Example
 
@@ -22,13 +22,12 @@ To create a release:
     zip -r my_model.zip my_model
 
 Now you can upload `my_model.zip` to Thingverse.  Someone who downloads
-`my_model.zip` can then use it can change parameters without having to install
-the dependency libraries manually.
+`my_model.zip` can then load it into OpenSCAD with no extra steps needed.
 
-Always load the output model into OpenSCAD to verify it can load without any
-problems.  Even better, load it onto a machine (or account) that does not have
-the needed libraries installed as these might make a broken release directory
-work anyway.
+**Note:** Always load the generated output into OpenSCAD to verify it can load
+without any problems.  Even better, load it onto a machine (or account) that
+does not have the needed libraries installed as these might make a broken
+release directory work anyway.
 
 # Library License Files
 
