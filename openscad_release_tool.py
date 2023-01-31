@@ -176,6 +176,9 @@ class CopyAndParse:
   file_chars: List[str] = []
   # root_output_dir is the root of the output dir as provided at the commandline
   root_output_dir: str = ''
+  # root_input_dir is the starting input directory which is sometimes
+  # needed by imports
+  root_input_dir: str = ''
   # Path to the target file
   target_path: str = ''
   # path to the source file
@@ -192,6 +195,7 @@ class CopyAndParse:
       self,
       source_path: str,
       lib_dirname: str,
+      root_input_dir: str,
       root_output_dir: str,
       target_path: str,
       indent: int,
@@ -325,9 +329,10 @@ class CopyAndParse:
     import_path = ''.join(self.file_chars[:-1])
     new_import_path = import_path
 
-    # two cases:
+    # three cases:
     # absolute path: need to make the path relative
     # relative path, can use as-is
+    # relative-to-parent, also can use as-is
 
     if os.path.isabs(import_path):
       import_abs_path = import_path
@@ -339,6 +344,10 @@ class CopyAndParse:
     else:
       import_abs_path = os.path.join(
           os.path.dirname(self.source_path), import_path)
+
+    if not os.path.exists(import_abs_path):
+      import_abs_path = os.path.join(
+          os.path.dirname(self.root_input_dir), import_path)
 
     if not os.path.exists(import_abs_path):
       raise ImportNotFoundError(
@@ -381,6 +390,7 @@ class CopyAndParse:
       CopyAndParse(
           source_path,
           self.lib_dirname,
+          self.root_input_dir,
           self.root_output_dir,
           target_path,
           self.indent + 1,
@@ -507,6 +517,7 @@ def create_release_directory(
   CopyAndParse(
       os.path.abspath(pathname),
       lib_dirname,
+      os.path.dirname(os.path.abspath(pathname)),
       root_output_dir,
       os.path.join(root_output_dir, filename),
       0,
